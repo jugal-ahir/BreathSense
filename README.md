@@ -19,12 +19,9 @@ A sophisticated Python implementation for **non-contact breathing rate detection
 ## 📸 Screenshots
 
 ### Main Dashboard
-![Dashboard](docs/dashboard.png)
+![Dashboard](dashboard.jpg)
 *Professional 4-panel visualization with clean spacing and white axis markings*
 
-### Animated Spectrum
-![Animation](docs/animation.gif)
-*Real-time animated frequency spectrum with pulsing detection*
 
 ## 🚀 Quick Start
 
@@ -191,12 +188,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - Research on WiFi sensing for healthcare applications
 - Signal processing techniques for breathing rate detection
 - Open source community for tools and libraries
-
-## 📞 Contact
-
-**Your Name** - [@yourusername](https://github.com/yourusername) - your.email@example.com
-
-Project Link: [https://github.com/yourusername/wifi-breathing-detection](https://github.com/yourusername/wifi-breathing-detection)
+- Professor Dhaval Patel and TAs for huge guidance
 
 ---
 
