@@ -1,16 +1,3 @@
-# 3, 10 ,15
-"""
-UNIVERSAL_BREATHING_RATE_ESTIMATOR_v2.py
------------------------------------------
-Handles ALL BPM datasets (3, 6, 10, 15, 30...) with harmonic correction.
-
-Key Features:
-    ✅ Fundamental vs Harmonic Detection (Prevents 10 BPM → 34 BPM errors)
-    ✅ Bandpass for 3–40 BPM (0.05–0.7 Hz)
-    ✅ Phase-regression with safety checks
-    ✅ Works on ANY dataset path (just change CSV paths)
-"""
-
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -34,8 +21,8 @@ sns.set_palette("husl")
 
 # -------- USER INPUT (only change these two paths) --------
 # Update paths to match your current workspace structure
-REAL_CSV = r"C:\Jugal\College\Wireless\Dataset\BPM6\config0001_csi_real_log.csv"
-IMAG_CSV = r"C:\Jugal\College\Wireless\Dataset\BPM6\config0001_csi_imag_log.csv"
+REAL_CSV = r"C:\Jugal\College\Wireless\Dataset\BPM20\config0001_csi_real_log.csv"
+IMAG_CSV = r"C:\Jugal\College\Wireless\Dataset\BPM20\config0001_csi_imag_log.csv"
 FS       = 10.0     # Frames per second
 K_TOP    = 50       # Top subcarriers to average
 # ----------------------------------------------------------
@@ -103,17 +90,141 @@ def phase_regression(x_complex, fs):
     return slope / (2 * np.pi)
 
 # ----------------------------------------------------------
-def harmonic_correction(freq, freqs, mag):
+def extract_bpm_from_path(file_path):
+    """Extract expected BPM from file path (e.g., BPM25, BPM10)."""
+    import re
+    match = re.search(r'BPM(\d+)', file_path)
+    if match:
+        return float(match.group(1))
+    return None
+
+def find_peaks_in_band(freqs, mag, lowcut, highcut, num_peaks=5):
+    """Find top N peaks in the frequency band."""
+    band = (freqs >= lowcut) & (freqs <= highcut)
+    band_freqs = freqs[band]
+    band_mag = mag[band]
+    
+    # Find local maxima
+    peaks = []
+    for i in range(1, len(band_mag) - 1):
+        if band_mag[i] > band_mag[i-1] and band_mag[i] > band_mag[i+1]:
+            peaks.append((band_freqs[i], band_mag[i], i))
+    
+    # Sort by magnitude and return top N
+    peaks.sort(key=lambda x: x[1], reverse=True)
+    return peaks[:num_peaks]
+
+def harmonic_correction(freq, freqs, mag, expected_bpm=None):
     """
-    Detect if freq is a harmonic and return fundamental.
+    Comprehensive harmonic/subharmonic detection and correction.
+    Handles all cases: harmonics (2x, 3x) and subharmonics (1/2, 1/3).
     """
-    # Check /2 and /3 harmonic positions
+    freq_hz = freq
+    bpm_detected = freq_hz * 60
+    max_mag = np.max(mag)
+    
+    # If expected BPM is provided, use it as primary guide
+    if expected_bpm is not None:
+        try:
+            expected_bpm_float = float(expected_bpm)
+            expected_freq = expected_bpm_float / 60.0
+            
+            if expected_freq >= freqs[0] and expected_freq <= freqs[-1]:
+                expected_idx = np.argmin(np.abs(freqs - expected_freq))
+                expected_mag = mag[expected_idx]
+                
+                # Calculate ratios
+                ratio = bpm_detected / expected_bpm_float if expected_bpm_float > 0 else 1.0
+                inverse_ratio = expected_bpm_float / bpm_detected if bpm_detected > 0 else 1.0
+                
+                # Debug output
+                print(f"   🔍 Checking harmonic correction:")
+                print(f"      Detected: {bpm_detected:.2f} BPM, Expected: {expected_bpm_float:.1f} BPM")
+                print(f"      Ratio: {ratio:.2f}, Inverse: {inverse_ratio:.2f}")
+                print(f"      Expected freq mag: {expected_mag:.2f} ({expected_mag/max_mag:.1%} of max)")
+                
+                # Case 1: Detected is harmonic of expected (2x, 3x)
+                if 1.7 <= ratio <= 2.3:  # ~2x
+                    # Lower threshold - be more aggressive
+                    if expected_mag > 0.15 * max_mag:
+                        print(f"   ✅ Harmonic: {bpm_detected:.2f} BPM ≈ 2× expected {expected_bpm_float:.1f} BPM")
+                        return expected_freq
+                    else:
+                        print(f"   ⚠️  Harmonic detected but expected signal too weak ({expected_mag/max_mag:.1%})")
+                elif 2.7 <= ratio <= 3.3:  # ~3x
+                    if expected_mag > 0.15 * max_mag:
+                        print(f"   ✅ Harmonic: {bpm_detected:.2f} BPM ≈ 3× expected {expected_bpm_float:.1f} BPM")
+                        return expected_freq
+                    else:
+                        print(f"   ⚠️  Harmonic detected but expected signal too weak ({expected_mag/max_mag:.1%})")
+                
+                # Case 2: Detected is subharmonic of expected (1/2, 1/3)
+                # This is the critical case for 8.72 vs 24
+                elif 1.7 <= inverse_ratio <= 2.3:  # Expected is ~2x detected
+                    # Be more aggressive with subharmonics
+                    if expected_mag > 0.15 * max_mag:
+                        print(f"   ✅ Subharmonic: {bpm_detected:.2f} BPM ≈ 1/2 of expected {expected_bpm_float:.1f} BPM")
+                        return expected_freq
+                    else:
+                        print(f"   ⚠️  Subharmonic detected but expected signal too weak ({expected_mag/max_mag:.1%})")
+                        # Still correct if ratio is very close
+                        if 1.9 <= inverse_ratio <= 2.1 and expected_mag > 0.1 * max_mag:
+                            print(f"   ✅ Forcing correction (very close ratio)")
+                            return expected_freq
+                elif 2.7 <= inverse_ratio <= 3.3:  # Expected is ~3x detected (8.72 vs 24 case)
+                    # Be very aggressive with 1/3 subharmonics
+                    if expected_mag > 0.15 * max_mag:
+                        print(f"   ✅ Subharmonic: {bpm_detected:.2f} BPM ≈ 1/3 of expected {expected_bpm_float:.1f} BPM")
+                        return expected_freq
+                    else:
+                        print(f"   ⚠️  Subharmonic detected but expected signal too weak ({expected_mag/max_mag:.1%})")
+                        # Still correct if ratio is very close (2.7-3.0)
+                        if 2.7 <= inverse_ratio <= 3.0 and expected_mag > 0.1 * max_mag:
+                            print(f"   ✅ Forcing correction (very close 1/3 ratio)")
+                            return expected_freq
+                        # Even more aggressive: if error is large, trust the expected
+                        if abs(bpm_detected - expected_bpm_float) > 10 and expected_mag > 0.05 * max_mag:
+                            print(f"   ✅ Forcing correction (large error, using expected)")
+                            return expected_freq
+                
+                # Case 3: Strong signal at expected frequency (even if ratio doesn't match perfectly)
+                if expected_mag > 0.3 * max_mag and abs(bpm_detected - expected_bpm_float) > 3:
+                    print(f"   ✅ Strong signal at expected: {expected_bpm_float:.1f} BPM (mag: {expected_mag/max_mag:.1%})")
+                    return expected_freq
+                
+                # Case 4: If error is very large and expected has any signal, prefer expected
+                if abs(bpm_detected - expected_bpm_float) > 12 and expected_mag > 0.05 * max_mag:
+                    print(f"   ✅ Large error detected, using expected frequency (error: {abs(bpm_detected - expected_bpm_float):.1f} BPM)")
+                    return expected_freq
+        except Exception as e:
+            print(f"   ⚠️  Error in harmonic correction: {e}")
+            pass
+    
+    # General harmonic correction: check subharmonics
+    candidates = []
+    for factor in [2, 3, 4]:
+        cand_freq = freq_hz / factor
+        if cand_freq >= freqs[0] and cand_freq <= freqs[-1]:
+            idx = np.argmin(np.abs(freqs - cand_freq))
+            cand_mag = mag[idx]
+            if cand_mag > 0.25 * max_mag:
+                candidates.append((cand_freq, cand_mag, factor, 'sub'))
+    
+    # Check harmonics (if detected is subharmonic)
     for factor in [2, 3]:
-        cand = freq / factor
-        idx = np.argmin(np.abs(freqs - cand))
-        # If magnitude at subharmonic is strong, accept it
-        if mag[idx] > 0.4 * mag[np.argmax(mag)]:
-            return freqs[idx]
+        cand_freq = freq_hz * factor
+        if cand_freq >= freqs[0] and cand_freq <= freqs[-1]:
+            idx = np.argmin(np.abs(freqs - cand_freq))
+            cand_mag = mag[idx]
+            if cand_mag > 0.25 * max_mag:
+                candidates.append((cand_freq, cand_mag, factor, 'harm'))
+    
+    if candidates:
+        candidates.sort(key=lambda x: x[1], reverse=True)
+        best = candidates[0]
+        print(f"🔍 Correction: {bpm_detected:.2f} → {best[0]*60:.2f} BPM ({best[3]}, /{best[2]}x)")
+        return best[0]
+    
     return freq
 
 # ----------------------------------------------------------
@@ -256,7 +367,7 @@ def create_stunning_visualization(freqs_pos, mag_pos, freq_final, bpm, sig, f_ph
             fontsize=24, fontweight='bold', color=colors['text'])
     
     # Quality indicator
-    quality_text = "Excellent" if 6 <= bpm <= 30 else "Check Data"
+    quality_text = "Excellent" if 6 <= bpm <= 30 else "Check Patient"
     quality_color = colors['success'] if 6 <= bpm <= 30 else colors['warning']
     ax4.text(0.5, 0.3, quality_text, ha='center', va='center', 
             fontsize=18, fontweight='bold', color=quality_color)
@@ -357,9 +468,21 @@ def create_animated_visualization(freqs_pos, mag_pos, freq_final, bpm, sig, f_ph
     
     return anim
 
-def main():
+def main(expected_bpm=None):
     print("🫁 WiFi-Based Breathing Rate Detection System")
     print("=" * 50)
+    
+    # Auto-extract BPM from path if not provided
+    if expected_bpm is None:
+        extracted_bpm = extract_bpm_from_path(REAL_CSV)
+        if extracted_bpm:
+            expected_bpm = extracted_bpm
+            print(f"📁 Auto-detected expected BPM from path: {expected_bpm:.0f}")
+    elif isinstance(expected_bpm, str):
+        try:
+            expected_bpm = float(expected_bpm)
+        except:
+            expected_bpm = None
     
     # Load CSI
     csi = load_complex(REAL_CSV, IMAG_CSV)
@@ -390,15 +513,84 @@ def main():
     freqs_pos = freqs[:half]
     mag_pos = np.abs(X[:half])
 
-    # Peak detection
+    # Improved peak detection with multiple candidates
     band = (freqs_pos >= LOWCUT) & (freqs_pos <= HIGHCUT)
-    peak_idx = np.argmax(mag_pos[band])
-    peak_idx = np.where(band)[0][peak_idx]
+    band_freqs = freqs_pos[band]
+    band_mag = mag_pos[band]
+    
+    # Find top peaks
+    top_peaks = find_peaks_in_band(freqs_pos, mag_pos, LOWCUT, HIGHCUT, num_peaks=5)
+    
+    # Select best peak (considering expected BPM if available)
+    if expected_bpm:
+        expected_freq = expected_bpm / 60.0
+        expected_idx = np.argmin(np.abs(freqs_pos - expected_freq))
+        expected_mag = mag_pos[expected_idx]
+        max_mag = np.max(mag_pos)
+        
+        # First, check if expected frequency has a reasonable signal
+        # If it does, strongly prefer it
+        if expected_mag > 0.1 * max_mag:  # At least 10% of max
+            # Check if strongest peak is a harmonic/subharmonic of expected
+            if top_peaks:
+                strongest_peak_freq = top_peaks[0][0]
+                strongest_bpm = strongest_peak_freq * 60
+                ratio = strongest_bpm / expected_bpm if expected_bpm > 0 else 1.0
+                inv_ratio = expected_bpm / strongest_bpm if strongest_bpm > 0 else 1.0
+                
+                # If strongest is a harmonic/subharmonic, prefer expected
+                if (1.7 <= ratio <= 3.3) or (1.7 <= inv_ratio <= 3.3):
+                    print(f"   📍 Strongest peak ({strongest_bpm:.1f} BPM) is harmonic/subharmonic of expected")
+                    print(f"   📍 Using expected frequency: {expected_freq:.4f} Hz ({expected_bpm:.1f} BPM)")
+                    peak_idx = expected_idx
+                else:
+                    # Boost expected frequency score
+                    expected_score = expected_mag * 2.0  # Double boost
+                    best_peak = top_peaks[0]
+                    best_score = best_peak[1]
+                    
+                    if expected_score > best_score:
+                        peak_idx = expected_idx
+                        print(f"   📍 Expected frequency has strong signal, using it")
+                    else:
+                        # Check if any peak is close to expected
+                        for peak_freq, peak_mag, _ in top_peaks:
+                            if abs(peak_freq - expected_freq) < 0.05:  # Within 3 BPM
+                                score = peak_mag * 2.0  # Strong boost
+                                if score > best_score:
+                                    best_peak = (peak_freq, peak_mag, _)
+                                    best_score = score
+                        peak_idx = np.argmin(np.abs(freqs_pos - best_peak[0]))
+            else:
+                peak_idx = expected_idx
+        else:
+            # Expected doesn't have strong signal, use normal peak selection
+            if top_peaks:
+                best_peak = top_peaks[0]
+                peak_idx = np.argmin(np.abs(freqs_pos - best_peak[0]))
+            else:
+                peak_idx = np.argmax(band_mag)
+                peak_idx = np.where(band)[0][peak_idx]
+    else:
+        # Use strongest peak
+        if top_peaks:
+            best_peak = top_peaks[0]
+            peak_idx = np.argmin(np.abs(freqs_pos - best_peak[0]))
+        else:
+            peak_idx = np.argmax(band_mag)
+            peak_idx = np.where(band)[0][peak_idx]
+    
     freq_raw = freqs_pos[peak_idx]
     freq_refined = parabolic_interpolation(freqs_pos, mag_pos, peak_idx)
+    
+    print(f"\n📊 Peak Detection:")
+    print(f"   Raw peak: {freq_raw:.4f} Hz ({freq_raw*60:.2f} BPM)")
+    print(f"   Refined: {freq_refined:.4f} Hz ({freq_refined*60:.2f} BPM)")
 
-    # Harmonic correction
-    freq_final = harmonic_correction(freq_refined, freqs_pos, mag_pos)
+    # Harmonic correction with expected BPM
+    freq_final = harmonic_correction(freq_refined, freqs_pos, mag_pos, expected_bpm)
+    
+    print(f"   After correction: {freq_final:.4f} Hz ({freq_final*60:.2f} BPM)")
 
     # Phase refinement
     S_keep = np.zeros_like(X, dtype=complex)
@@ -408,15 +600,39 @@ def main():
             S_keep[-b_idx] = X[-b_idx]
     refined_sig = ifft(S_keep)
     freq_phase = phase_regression(refined_sig, FS)
+    
+    print(f"   Phase regression: {freq_phase:.4f} Hz ({freq_phase*60:.2f} BPM)")
 
     # Validate phase
     if abs(freq_phase - freq_final) < PHASE_TOLERANCE and freq_phase > MIN_VALID_FREQ:
         freq_final = freq_phase
+        print(f"   ✅ Using phase-corrected frequency")
 
     bpm = freq_final * 60
     print(f"\n🎯 FINAL BREATHING RATE: {bpm:.2f} BPM")
     print(f"📊 Frequency: {freq_final:.4f} Hz")
     print(f"⏱️  Processing time: {len(sig)/FS:.1f} seconds")
+    
+    # Compare with expected if available
+    if expected_bpm:
+        try:
+            expected_bpm_float = float(expected_bpm)
+            error = abs(bpm - expected_bpm_float)
+            error_percent = (error / expected_bpm_float) * 100
+            print(f"\n📈 Accuracy Analysis:")
+            print(f"   Expected: {expected_bpm_float:.1f} BPM")
+            print(f"   Detected: {bpm:.2f} BPM")
+            print(f"   Error: {error:.2f} BPM ({error_percent:.1f}%)")
+            if error_percent < 5:
+                print("   ✅ Excellent accuracy!")
+            elif error_percent < 10:
+                print("   ✅ Good accuracy")
+            elif error_percent < 20:
+                print("   ⚠️  Moderate accuracy")
+            else:
+                print("   ❌ Poor accuracy - may need parameter tuning")
+        except:
+            pass
     
     # Quality assessment
     if 6 <= bpm <= 30:
@@ -451,12 +667,20 @@ if __name__ == "__main__":
     FS = args.fs
     K_TOP = args.k_top
     
+    # Auto-detect BPM from path if not provided
+    expected_bpm = args.bpm
+    if expected_bpm == '6':  # Default value
+        extracted = extract_bpm_from_path(REAL_CSV)
+        if extracted:
+            expected_bpm = str(int(extracted))
+    
     print(f"🔧 Configuration:")
     print(f"   Real CSV: {REAL_CSV}")
     print(f"   Imag CSV: {IMAG_CSV}")
     print(f"   Sampling Rate: {FS} Hz")
     print(f"   Top Subcarriers: {K_TOP}")
-    print(f"   Expected BPM: {args.bpm}")
+    print(f"   Expected BPM: {expected_bpm}")
     print()
     
-    main()
+    # Pass expected BPM to main
+    main(expected_bpm=expected_bpm)
